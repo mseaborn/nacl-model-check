@@ -94,7 +94,7 @@ def Run(ch):
             yield 'FAIL: %r != %r' % (a, b)
 
     def A(thread):
-        ### suspend
+        ### NaClUntrustedThreadsSuspend()
         for x in lck.lock(thread): yield x
 
         old_state = st.state
@@ -109,12 +109,12 @@ def Run(ch):
 
         for x in lck.unlock(thread): yield x
 
-        ### resume
+        ### NaClUntrustedThreadsResume()
         if lock_around_resume:
             for x in lck.lock(thread): yield x
 
         old_state = st.state
-        yield 'read state'
+        yield 'read state (got %r)' % old_state
         for x in asserteq(old_state & SUSPENDING, SUSPENDING): yield x
 
         suspended.remove('B')
@@ -122,6 +122,15 @@ def Run(ch):
 
         st.state = old_state & ~SUSPENDING
         yield 'change state back'
+
+        # Doing the same assignment again is not OK, because the first
+        # assignment unblocked the thread from running.  The other thread
+        # could have changed the state, and we would be overwriting that
+        # change.
+        # st.state = old_state & ~SUSPENDING
+        # yield 'change state back (again)'
+
+        # CondVarSignal
         wake = ('B' not in runnable and
                 'B' not in suspended and
                 'B' in threads)
@@ -132,25 +141,29 @@ def Run(ch):
         if lock_around_resume:
             for x in lck.unlock(thread): yield x
 
-    def B(thread):
+    # Based on NaClAppThreadSetSuspendState()
+    def SetSuspendState(thread, old_state, new_state):
         for x in lck.lock(thread): yield x
         while 1:
             state = st.state
-            yield 'get state'
+            yield 'read state (got %r)' % state
             if (state & SUSPENDING) == 0:
                 break
-            # condvarwait
+            # CondVarWait
             lck.unlock_quiet(thread)
             runnable.remove(thread)
             yield 'wait (unlocks)'
             for x in lck.lock(thread): yield x
-            # assert lck.locked == None
-            # lck.locked = thread
-        for x in asserteq(state, UNTRUSTED): yield x
 
-        st.state = TRUSTED
+        for x in asserteq(st.state, old_state): yield x
+
+        st.state = new_state
         yield 'state := trusted'
         for x in lck.unlock(thread): yield x
+
+    def B(thread):
+        for x in SetSuspendState(thread, UNTRUSTED, TRUSTED): yield x
+        for x in SetSuspendState(thread, TRUSTED, UNTRUSTED): yield x
 
     def run_thread(thr):
         if thr not in runnable and thr in threads:
