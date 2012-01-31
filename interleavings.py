@@ -17,6 +17,7 @@ class Chooser(object):
         self._queue = queue
 
     def choose(self, choices):
+        assert len(choices) > 0
         if self._index < len(self._so_far):
             choice = self._so_far[self._index]
             if choice not in choices:
@@ -83,7 +84,7 @@ def Run(ch):
     SUSPENDING = 4
 
     lock_around_resume = 1
-    suspend_works = 0
+    suspend_is_deferred = 1
 
     class State:
         state = UNTRUSTED
@@ -92,6 +93,21 @@ def Run(ch):
     def asserteq(a, b):
         if a != b:
             yield 'FAIL: %r != %r' % (a, b)
+
+    def SuspendThread(thread):
+        if suspend_is_deferred:
+            suspend_pending.append(thread)
+            yield 'SuspendThread(%s) pending' % thread
+        else:
+            suspended.add(thread)
+            yield 'SuspendThread(%s)' % thread
+
+    def ResumeThread(thread):
+        if thread in suspend_pending:
+            suspend_pending.remove(thread)
+        else:
+            suspended.remove(thread)
+        yield 'ResumeThread(%s)' % thread
 
     def A(thread):
         ### NaClUntrustedThreadsSuspend()
@@ -104,8 +120,7 @@ def Run(ch):
         st.state = old_state | SUSPENDING
         yield 'state |= suspend'
 
-        suspended.add('B')
-        yield 'SuspendThread'
+        for x in SuspendThread('B'): yield x
 
         for x in lck.unlock(thread): yield x
 
@@ -117,8 +132,7 @@ def Run(ch):
         yield 'read state (got %r)' % old_state
         for x in asserteq(old_state & SUSPENDING, SUSPENDING): yield x
 
-        suspended.remove('B')
-        yield 'ResumeThread'
+        for x in ResumeThread('B'): yield x
 
         st.state = old_state & ~SUSPENDING
         yield 'change state back'
@@ -173,15 +187,24 @@ def Run(ch):
                'B': Wrap('    B', B('B'))}
     runnable = sorted(threads.keys())
     suspended = set()
+    suspend_pending = []
     got = []
-    while runnable:
-        if suspend_works:
-            runnable2 = [i for i in runnable if i not in suspended]
-        else:
-            runnable2 = runnable
+    while True:
+        # Process pending SuspendThread() calls
+        while suspend_pending and ch.choose((0, 1)):
+            i = suspend_pending.pop(0)
+            suspended.add(i)
+            got.append('SuspendThread(%s) kicked in' % i)
+
+        runnable2 = [i for i in runnable if i not in suspended]
+        if len(runnable2) == 0:
+            break
         i = ch.choose(runnable2)
         try:
-            got.append(threads[i].next())
+            item = threads[i].next()
+            if i in suspend_pending:
+                item += ' (borrowed time)'
+            got.append(item)
         except StopIteration:
             threads.pop(i)
             runnable.remove(i)
