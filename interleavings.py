@@ -82,6 +82,7 @@ def Run(ch):
     UNTRUSTED = 1
     TRUSTED = 2
     SUSPENDING = 4
+    WAITING = 8
 
     lock_around_resume = 1
     suspend_is_deferred = 1
@@ -95,6 +96,8 @@ def Run(ch):
             yield 'FAIL: %r != %r' % (a, b)
 
     def SuspendThread(thread):
+        assert thread not in suspended
+        assert thread not in suspend_pending
         if suspend_is_deferred:
             suspend_pending.append(thread)
             yield 'SuspendThread(%s) pending' % thread
@@ -109,75 +112,78 @@ def Run(ch):
             suspended.remove(thread)
         yield 'ResumeThread(%s)' % thread
 
+    def Wake(thread):
+        wake = (thread not in runnable and
+                thread not in suspended and
+                thread in threads)
+        if wake:
+            runnable.append(thread)
+        yield 'wake(%s) -> %r' % (thread, wake)
+
     def A(thread):
         ### NaClUntrustedThreadsSuspend()
-        for x in lck.lock(thread): yield x
+        while True:
+            prev_state = st.state
+            yield 'read state (got %r)' % prev_state
+            if st.state == prev_state:
+                st.state = prev_state | SUSPENDING
+                break
 
-        old_state = st.state
-        yield 'read state'
-
-        for x in asserteq(old_state & SUSPENDING, 0): yield x
-        st.state = old_state | SUSPENDING
-        yield 'state |= suspend'
-
-        for x in SuspendThread('B'): yield x
-
-        for x in lck.unlock(thread): yield x
+        if prev_state & UNTRUSTED:
+            for x in SuspendThread('B'): yield x
 
         ### NaClUntrustedThreadsResume()
-        if lock_around_resume:
-            for x in lck.lock(thread): yield x
+        yield 'resume phase'
 
-        old_state = st.state
-        yield 'read state (got %r)' % old_state
-        for x in asserteq(old_state & SUSPENDING, SUSPENDING): yield x
-
-        for x in ResumeThread('B'): yield x
-
-        st.state = old_state & ~SUSPENDING
-        yield 'change state back'
-
-        # Doing the same assignment again is not OK, because the first
-        # assignment unblocked the thread from running.  The other thread
-        # could have changed the state, and we would be overwriting that
-        # change.
-        # st.state = old_state & ~SUSPENDING
-        # yield 'change state back (again)'
-
-        # CondVarSignal
-        wake = ('B' not in runnable and
-                'B' not in suspended and
-                'B' in threads)
-        if wake:
-            runnable.append('B')
-        yield 'wake(B) -> %r' % wake
-
-        if lock_around_resume:
-            for x in lck.unlock(thread): yield x
+        while True:
+            prev_state = st.state
+            yield 'read state (got %r)' % prev_state
+            if (prev_state & SUSPENDING) == 0:
+                yield 'FAIL: not suspended'
+                return
+            if st.state != prev_state:
+                if (prev_state & WAITING) != 0:
+                    # The state should no longer be changed concurrently.
+                    # Check this.
+                    yield 'FAIL: state changed'
+                    return
+                continue
+            st.state = prev_state &~ (SUSPENDING | WAITING)
+            if (prev_state & UNTRUSTED) != 0:
+                for x in ResumeThread('B'): yield x
+            if (prev_state & WAITING) != 0:
+                for x in Wake('B'): yield x
+            break
 
     # Based on NaClAppThreadSetSuspendState()
     def SetSuspendState(thread, old_state, new_state):
-        for x in lck.lock(thread): yield x
-        while 1:
-            state = st.state
-            yield 'read state (got %r)' % state
-            if (state & SUSPENDING) == 0:
+        while True:
+            prev_state = st.state
+            yield 'read state (got %r)' % prev_state
+            if prev_state == old_state:
+                if st.state == prev_state:
+                    st.state = new_state
+                    yield 'set state; done'
+                    break
+            elif prev_state == (old_state | SUSPENDING):
+                if st.state == prev_state:
+                    st.state = prev_state | WAITING
+                    # Wait
+                    runnable.remove(thread)
+                    yield 'set state; waiting'
+                    # SUSPENDING and WAITING flags will have been
+                    # removed, but SUSPENDING could have got set
+                    # again, so we need to restart.
+            else:
+                yield 'FAIL: bad state'
                 break
-            # CondVarWait
-            lck.unlock_quiet(thread)
-            runnable.remove(thread)
-            yield 'wait (unlocks)'
-            for x in lck.lock(thread): yield x
-
-        for x in asserteq(st.state, old_state): yield x
-
-        st.state = new_state
-        yield 'state := trusted'
-        for x in lck.unlock(thread): yield x
 
     def B(thread):
         for x in SetSuspendState(thread, UNTRUSTED, TRUSTED): yield x
         for x in SetSuspendState(thread, TRUSTED, UNTRUSTED): yield x
+
+    def CheckFinalCondition():
+        assert st.state == UNTRUSTED
 
     def run_thread(thr):
         if thr not in runnable and thr in threads:
@@ -209,7 +215,9 @@ def Run(ch):
             threads.pop(i)
             runnable.remove(i)
     for i in sorted(threads.keys()):
-        got.append('DEADLOCK: %s' % i)
+        got.append('FAIL: DEADLOCK: %s' % i)
+    if len(threads) == 0:
+        CheckFinalCondition()
     return got
 
 
