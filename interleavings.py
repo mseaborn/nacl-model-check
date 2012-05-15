@@ -84,7 +84,9 @@ def Run(ch):
     SUSPENDING = 4
 
     lock_around_resume = 1
-    suspend_is_deferred = 1
+    # This models SuspendThread() being used without GetThreadContext()
+    # (which waits for the thread to suspend).
+    suspend_is_deferred = 0
 
     class State:
         state = UNTRUSTED
