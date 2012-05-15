@@ -211,7 +211,7 @@ def Run(ch):
             threads.pop(i)
             runnable.remove(i)
     for i in sorted(threads.keys()):
-        got.append('DEADLOCK: %s' % i)
+        got.append('FAIL: DEADLOCK: %s' % i)
     return got
 
 
