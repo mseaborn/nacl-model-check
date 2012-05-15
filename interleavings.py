@@ -143,29 +143,33 @@ def Run(ch):
     runnable = sorted(threads.keys())
     suspended = set()
     suspend_pending = []
-    got = []
-    while True:
-        # Process pending SuspendThread() calls
-        while suspend_pending and ch.choose((0, 1)):
-            i = suspend_pending.pop(0)
-            suspended.add(i)
-            got.append('SuspendThread(%s) kicked in' % i)
 
-        runnable2 = [i for i in runnable if i not in suspended]
-        if len(runnable2) == 0:
-            break
-        i = ch.choose(runnable2)
-        try:
-            item = threads[i].next()
-            if i in suspend_pending:
-                item += ' (borrowed time)'
-            got.append(item)
-        except StopIteration:
-            threads.pop(i)
-            runnable.remove(i)
-    for i in sorted(threads.keys()):
-        got.append('FAIL: DEADLOCK: %s' % i)
-    return got
+    def run_process():
+        got = []
+        while True:
+            # Process pending SuspendThread() calls
+            while suspend_pending and ch.choose((0, 1)):
+                i = suspend_pending.pop(0)
+                suspended.add(i)
+                got.append('SuspendThread(%s) kicked in' % i)
+
+            runnable2 = [i for i in runnable if i not in suspended]
+            if len(runnable2) == 0:
+                break
+            i = ch.choose(runnable2)
+            try:
+                item = threads[i].next()
+                if i in suspend_pending:
+                    item += ' (borrowed time)'
+                got.append(item)
+            except StopIteration:
+                threads.pop(i)
+                runnable.remove(i)
+        for i in sorted(threads.keys()):
+            got.append('FAIL: DEADLOCK: %s' % i)
+        return got
+
+    return run_process()
 
 
 if __name__ == '__main__':
