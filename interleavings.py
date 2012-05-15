@@ -8,29 +8,35 @@ def Wrap(prefix, seq):
         yield '%s: %s' % (prefix, x)
 
 
-def Run(proc):
-    class Lock(object):
-        def __init__(self):
-            self.locked = None
-            self.waiters = []
-        def lock(self, thread):
-            while self.locked:
-                proc.runnable.remove(thread)
-                self.waiters.append(thread)
-                yield 'lock: (waiting)'
-            self.locked = thread
-            yield 'lock: acquired'
-        def unlock_quiet(self, thread):
-            assert self.locked == thread, (self.locked, thread)
-            for i in self.waiters:
-                proc.run_thread(i)
-            self.locked = None
-            self.waiters = []
-        def unlock(self, thread):
-            self.unlock_quiet(thread)
-            yield 'unlock'
+class Lock(object):
 
-    lck = Lock()
+    def __init__(self, proc):
+        self._proc = proc
+        self.locked = None
+        self.waiters = []
+
+    def lock(self, thread):
+        while self.locked:
+            self._proc.runnable.remove(thread)
+            self.waiters.append(thread)
+            yield 'lock: (waiting)'
+        self.locked = thread
+        yield 'lock: acquired'
+
+    def unlock_quiet(self, thread):
+        assert self.locked == thread, (self.locked, thread)
+        for i in self.waiters:
+            self._proc.run_thread(i)
+        self.locked = None
+        self.waiters = []
+
+    def unlock(self, thread):
+        self.unlock_quiet(thread)
+        yield 'unlock'
+
+
+def Run(proc):
+    lck = Lock(proc)
 
     UNTRUSTED = 1
     TRUSTED = 2
