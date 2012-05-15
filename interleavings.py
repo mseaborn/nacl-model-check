@@ -8,14 +8,14 @@ def Wrap(prefix, seq):
         yield '%s: %s' % (prefix, x)
 
 
-def Run(ch):
+def Run(proc):
     class Lock(object):
         def __init__(self):
             self.locked = None
             self.waiters = []
         def lock(self, thread):
             while self.locked:
-                runnable.remove(thread)
+                proc.runnable.remove(thread)
                 self.waiters.append(thread)
                 yield 'lock: (waiting)'
             self.locked = thread
@@ -23,7 +23,7 @@ def Run(ch):
         def unlock_quiet(self, thread):
             assert self.locked == thread, (self.locked, thread)
             for i in self.waiters:
-                run_thread(i)
+                proc.run_thread(i)
             self.locked = None
             self.waiters = []
         def unlock(self, thread):
@@ -51,17 +51,17 @@ def Run(ch):
 
     def SuspendThread(thread):
         if suspend_is_deferred:
-            suspend_pending.append(thread)
+            proc.suspend_pending.append(thread)
             yield 'SuspendThread(%s) pending' % thread
         else:
-            suspended.add(thread)
+            proc.suspended.add(thread)
             yield 'SuspendThread(%s)' % thread
 
     def ResumeThread(thread):
-        if thread in suspend_pending:
-            suspend_pending.remove(thread)
+        if thread in proc.suspend_pending:
+            proc.suspend_pending.remove(thread)
         else:
-            suspended.remove(thread)
+            proc.suspended.remove(thread)
         yield 'ResumeThread(%s)' % thread
 
     def A(thread):
@@ -100,11 +100,11 @@ def Run(ch):
         # yield 'change state back (again)'
 
         # CondVarSignal
-        wake = ('B' not in runnable and
-                'B' not in suspended and
-                'B' in threads)
+        wake = ('B' not in proc.runnable and
+                'B' not in proc.suspended and
+                'B' in proc.threads)
         if wake:
-            runnable.append('B')
+            proc.runnable.append('B')
         yield 'wake(B) -> %r' % wake
 
         if lock_around_resume:
@@ -120,7 +120,7 @@ def Run(ch):
                 break
             # CondVarWait
             lck.unlock_quiet(thread)
-            runnable.remove(thread)
+            proc.runnable.remove(thread)
             yield 'wait (unlocks)'
             for x in lck.lock(thread): yield x
 
@@ -134,43 +134,57 @@ def Run(ch):
         for x in SetSuspendState(thread, UNTRUSTED, TRUSTED): yield x
         for x in SetSuspendState(thread, TRUSTED, UNTRUSTED): yield x
 
-    def run_thread(thr):
-        if thr not in runnable and thr in threads:
-            runnable.append(thr)
+    proc.add_thread('A', Wrap('A', A('A')))
+    proc.add_thread('B', Wrap('    B', B('B')))
 
-    threads = {'A': Wrap('A', A('A')),
-               'B': Wrap('    B', B('B'))}
-    runnable = sorted(threads.keys())
-    suspended = set()
-    suspend_pending = []
 
-    def run_process():
+class Process(object):
+
+    def __init__(self):
+        self.threads = {}
+        self.runnable = []
+        self.suspended = set()
+        self.suspend_pending = []
+
+    def add_thread(self, name, thread):
+        self.threads[name] = thread
+        self.runnable.append(name)
+
+    def run_thread(self, thr):
+        if thr not in self.runnable and thr in self.threads:
+            self.runnable.append(thr)
+
+    def run_process(self, ch):
         got = []
         while True:
             # Process pending SuspendThread() calls
-            while suspend_pending and ch.choose((0, 1)):
-                i = suspend_pending.pop(0)
-                suspended.add(i)
+            while self.suspend_pending and ch.choose((0, 1)):
+                i = self.suspend_pending.pop(0)
+                self.suspended.add(i)
                 got.append('SuspendThread(%s) kicked in' % i)
 
-            runnable2 = [i for i in runnable if i not in suspended]
+            runnable2 = [i for i in self.runnable if i not in self.suspended]
             if len(runnable2) == 0:
                 break
             i = ch.choose(runnable2)
             try:
-                item = threads[i].next()
-                if i in suspend_pending:
+                item = self.threads[i].next()
+                if i in self.suspend_pending:
                     item += ' (borrowed time)'
                 got.append(item)
             except StopIteration:
-                threads.pop(i)
-                runnable.remove(i)
-        for i in sorted(threads.keys()):
+                self.threads.pop(i)
+                self.runnable.remove(i)
+        for i in sorted(self.threads.keys()):
             got.append('FAIL: DEADLOCK: %s' % i)
         return got
 
-    return run_process()
+
+def RunMain(ch):
+    proc = Process()
+    Run(proc)
+    return proc.run_process(ch)
 
 
 if __name__ == '__main__':
-    modelcheck.check(Run)
+    modelcheck.check(RunMain)
